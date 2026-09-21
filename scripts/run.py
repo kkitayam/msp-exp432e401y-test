@@ -1,13 +1,5 @@
 #!/usr/bin/env python3
-"""
-Run target implementation for FPB-RX261.
-
-This script performs the following operations:
-1. Opens a serial port to capture UART logs
-2. Starts the FPB-RX261 application using rfp-cli
-3. Captures UART logs for a specified duration
-4. Closes the serial port and saves the log file
-"""
+"""Deploy an MSP432E401Y image with dslite and observe its UART output."""
 
 import argparse
 import logging
@@ -15,251 +7,173 @@ import subprocess
 import sys
 import time
 from pathlib import Path
-from typing import Optional
+from typing import BinaryIO
 
 import serial
 
 
 class SerialLogCapture:
-    """Manages UART log capture and application execution."""
+    """Deploy an image and collect UART output."""
 
-    def __init__(self, serial_port: str, build_dir: str, duration: int = 5, display: bool = False):
-        """
-        Initialize the serial log capture.
-
-        Args:
-            serial_port: Serial port name (e.g., COM3, /dev/ttyUSB0)
-            build_dir: Build directory path for log file output
-            duration: Log capture duration in seconds
-            display: If True, also print logs to stdout
-        """
+    def __init__(
+        self,
+        serial_port: str,
+        dslite: str,
+        ccxml: str,
+        firmware: str,
+        duration: int,
+        log_file: Path | None,
+    ) -> None:
         self.serial_port = serial_port
-        self.build_dir = Path(build_dir)
+        self.dslite = dslite
+        self.ccxml = ccxml
+        self.firmware = firmware
         self.duration = duration
-        self.log_file = self.build_dir / "uart.log"
-        self.serial = None
-        self.rfp_process = None
-        self.display = display
-
-        logging.basicConfig(
-            level=logging.INFO,
-            format="%(asctime)s - %(levelname)s - %(message)s"
-        )
+        self.log_file = log_file
+        self.serial_port_handle: serial.Serial | None = None
         self.logger = logging.getLogger(__name__)
 
-    def open_serial_port(self) -> bool:
-        """
-        Open the serial port.
-
-        Returns:
-            True if successful, False otherwise
-        """
-        try:
-            self.logger.info(f"Opening serial port: {self.serial_port}")
-            self.serial = serial.Serial(
-                port=self.serial_port,
-                baudrate=115200,
-                timeout=1
-            )
-            self.logger.info(f"Serial port opened successfully")
-            return True
-        except serial.SerialException as e:
-            self.logger.error(f"Failed to open serial port {self.serial_port}: {e}")
-            return False
+    def open_serial_port(self) -> None:
+        """Open the configured UART port."""
+        self.logger.info("Opening serial port: %s", self.serial_port)
+        self.serial_port_handle = serial.Serial(
+            port=self.serial_port,
+            baudrate=115200,
+            timeout=0,
+        )
 
     def close_serial_port(self) -> None:
-        """Close the serial port."""
-        if self.serial is not None:
-            try:
-                self.serial.close()
-                self.logger.info("Serial port closed")
-            except Exception as e:
-                self.logger.error(f"Error closing serial port: {e}")
+        """Close the UART port if it is open."""
+        if self.serial_port_handle is not None:
+            self.serial_port_handle.close()
+            self.serial_port_handle = None
 
-    def start_application(self, rfp_cli: str, rfp_args: list) -> bool:
-        """
-        Start the FPB-RX261 application using rfp-cli.
+    def capture_available(self, log_file: BinaryIO | None) -> None:
+        """Display and optionally save all UART bytes currently available."""
+        if self.serial_port_handle is None:
+            return
 
-        Args:
-            rfp_cli: Path to rfp-cli executable
-            rfp_args: Arguments to pass to rfp-cli
+        byte_count = self.serial_port_handle.in_waiting
+        if byte_count == 0:
+            return
 
-        Returns:
-            True if process started successfully, False otherwise
-        """
+        data = self.serial_port_handle.read(byte_count)
+        if log_file is not None:
+            log_file.write(data)
+            log_file.flush()
+
+        sys.stdout.write(data.decode("utf-8", errors="replace"))
+        sys.stdout.flush()
+
+    def deploy(self, log_file: BinaryIO | None) -> int:
+        """Run dslite while observing UART output."""
+        command = [self.dslite, "-c", self.ccxml, self.firmware]
+        self.logger.info("Deploying firmware: %s", " ".join(command))
         try:
-            self.logger.info(f"Starting application with rfp-cli: {rfp_cli}")
-            self.rfp_process = subprocess.Popen(
-                [rfp_cli] + rfp_args,
-                stdout=subprocess.PIPE,
-                stderr=subprocess.PIPE
+            process = subprocess.Popen(command)
+        except OSError as error:
+            self.logger.error("Failed to start dslite: %s", error)
+            return 1
+
+        while process.poll() is None:
+            self.capture_available(log_file)
+            time.sleep(0.01)
+
+        self.capture_available(log_file)
+        if process.returncode != 0:
+            self.logger.error("dslite exited with return code: %d", process.returncode)
+            return process.returncode
+
+        return 0
+
+    def capture_for_duration(self, log_file: BinaryIO | None) -> None:
+        """Capture UART output for the configured duration."""
+        deadline = time.monotonic() + self.duration
+        while time.monotonic() < deadline:
+            self.capture_available(log_file)
+            time.sleep(0.01)
+        self.capture_available(log_file)
+
+    def run(self) -> int:
+        """Open UART, deploy firmware, and optionally write a UART log."""
+        try:
+            self.open_serial_port()
+        except serial.SerialException as error:
+            self.logger.error(
+                "Failed to open serial port %s: %s", self.serial_port, error
             )
-            self.logger.info(f"Application started (PID: {self.rfp_process.pid})")
-            return True
-        except Exception as e:
-            self.logger.error(f"Failed to start application: {e}")
-            return False
+            return 1
 
-    def capture_logs(self) -> bool:
-        """
-        Capture UART logs for the specified duration.
-
-        Returns:
-            True if successful, False otherwise
-        """
         try:
-            self.logger.info(f"Starting log capture for {self.duration} seconds")
+            if self.log_file is None:
+                return self.deploy(None)
+
             self.log_file.parent.mkdir(parents=True, exist_ok=True)
+            with self.log_file.open("wb") as file:
+                deploy_status = self.deploy(file)
+                if deploy_status != 0:
+                    return deploy_status
 
-            with open(self.log_file, "wb") as f:
-                start_time = time.time()
-
-                while time.time() - start_time < self.duration:
-                    if self.serial is not None and self.serial.in_waiting > 0:
-                        try:
-                            data = self.serial.read(self.serial.in_waiting)
-                            f.write(data)
-                            f.flush()
-
-                            if self.display:
-                                try:
-                                    text = data.decode('utf-8', errors='replace')
-                                    sys.stdout.write(text)
-                                    sys.stdout.flush()
-                                except Exception:
-                                    pass
-                        except Exception as e:
-                            self.logger.error(f"Error reading from serial port: {e}")
-                            return False
-                    else:
-                        time.sleep(0.01)
-
-            self.logger.info(f"Log capture completed. Logs saved to: {self.log_file}")
-            return True
-        except Exception as e:
-            self.logger.error(f"Failed to capture logs: {e}")
-            return False
-
-    def wait_for_application(self) -> int:
-        """
-        Wait for the application process to complete.
-
-        Returns:
-            Return code of the process
-        """
-        if self.rfp_process is None:
-            return 0
-
-        try:
-            return_code = self.rfp_process.wait()
-            self.logger.info(f"Application exited with return code: {return_code}")
-            return return_code
-        except Exception as e:
-            self.logger.error(f"Error waiting for application: {e}")
+                self.capture_for_duration(file)
+                self.logger.info("UART log saved to: %s", self.log_file)
+                return 0
+        except (OSError, serial.SerialException) as error:
+            self.logger.error("UART capture failed: %s", error)
             return 1
-
-    def terminate_application(self) -> None:
-        """Terminate the application process if it is still running."""
-        if self.rfp_process is not None:
-            try:
-                if self.rfp_process.poll() is None:
-                    self.logger.info("Terminating application process")
-                    self.rfp_process.terminate()
-                    self.rfp_process.wait(timeout=5)
-            except subprocess.TimeoutExpired:
-                self.logger.warning("Application process did not terminate; killing it")
-                self.rfp_process.kill()
-            except Exception as e:
-                self.logger.error(f"Error terminating application: {e}")
-
-    def run(self, rfp_cli: str, rfp_args: list) -> int:
-        """
-        Execute the full log capture and application run sequence.
-
-        Args:
-            rfp_cli: Path to rfp-cli executable
-            rfp_args: Arguments to pass to rfp-cli
-
-        Returns:
-            Exit code (0 for success, 1 for failure)
-        """
-        try:
-            if not self.open_serial_port():
-                return 1
-
-            if not self.start_application(rfp_cli, rfp_args):
-                self.close_serial_port()
-                return 1
-
-            if not self.capture_logs():
-                self.close_serial_port()
-                self.terminate_application()
-                return 1
-
-            self.terminate_application()
+        finally:
             self.close_serial_port()
-            return 0
-
-        except Exception as e:
-            self.logger.error(f"Unexpected error: {e}")
-            self.close_serial_port()
-            self.terminate_application()
-            return 1
 
 
 def main() -> int:
-    """
-    Main entry point.
-
-    Returns:
-        Exit code
-    """
+    """Parse command-line arguments and deploy firmware."""
     parser = argparse.ArgumentParser(
-        description="Run FPB-RX261 application with UART log capture"
+        description="Deploy MSP432E401Y firmware with dslite and observe UART output"
     )
     parser.add_argument(
         "serial_port",
-        help="Serial port for UART logging (e.g., COM3, /dev/ttyUSB0)"
+        help="Serial port for UART output (for example, COM5)",
     )
     parser.add_argument(
-        "--build-dir",
+        "--dslite",
         required=True,
-        help="Build directory path"
+        help="Path to the dslite executable",
     )
     parser.add_argument(
-        "--rfp-cli",
+        "--ccxml",
         required=True,
-        help="Path to rfp-cli executable"
+        help="Path to the target configuration file",
+    )
+    parser.add_argument(
+        "--firmware",
+        required=True,
+        help="Path to the firmware ELF file",
     )
     parser.add_argument(
         "--duration",
         type=int,
         default=5,
-        help="Log capture duration in seconds (default: 5)"
+        help="UART capture duration after deployment in seconds (default: 5)",
     )
     parser.add_argument(
-        "--display",
-        action="store_true",
-        help="Display UART logs to stdout in addition to saving to file"
+        "--log-file",
+        type=Path,
+        help="Write UART output to this file",
     )
-
     args = parser.parse_args()
 
-    if not args.serial_port:
-        print("Error: serial_port option is required", file=sys.stderr)
-        return 1
+    if args.duration < 0:
+        parser.error("--duration must not be negative")
 
-    capture = SerialLogCapture(args.serial_port, args.build_dir, args.duration, args.display)
-
-    rfp_args = [
-        "-d", "RX65x",
-        "-t", "e2l",
-        "-if", "fine",
-        "-auth", "id", "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF",
-        "-run"
-    ]
-
-    return capture.run(args.rfp_cli, rfp_args)
+    logging.basicConfig(level=logging.INFO, format="%(levelname)s: %(message)s")
+    capture = SerialLogCapture(
+        args.serial_port,
+        args.dslite,
+        args.ccxml,
+        args.firmware,
+        args.duration,
+        args.log_file,
+    )
+    return capture.run()
 
 
 if __name__ == "__main__":

@@ -54,15 +54,6 @@ app_txt = custom_target(
   build_by_default: true,
 )
 
-run_target(
-  'deploy',
-  command: [
-    dslite,
-    '-c', ccxml,
-    app_exe,
-  ]
-)
-
 if serial_port_option == ''
   error('serial_port option must be specified. Use -Dserial_port=<port>')
 endif
@@ -70,24 +61,26 @@ endif
 run_script = meson.current_source_dir() / 'scripts' / 'run.py'
 
 run_target(
-  'run',
+  'deploy-run',
   command: [
     python_exe,
     run_script,
     serial_port_option,
-    '--build-dir', meson.current_build_dir(),
-    '--rfp-cli', dslite,
-    '--display',
+    '--dslite', dslite,
+    '--ccxml', ccxml,
+    '--firmware', app_exe,
   ]
 )
 
 run_target(
-  'run-capture',
+  'deploy-run-capture',
   command: [
     python_exe,
     run_script,
     serial_port_option,
-    '--build-dir', meson.current_build_dir(),
-    '--rfp-cli', dslite,
+    '--dslite', dslite,
+    '--ccxml', ccxml,
+    '--firmware', app_exe,
+    '--log-file', meson.current_build_dir() / 'uart.log',
   ]
 )

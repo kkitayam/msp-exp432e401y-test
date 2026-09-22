@@ -1,6 +1,19 @@
 /* SPDX-License-Identifier: Apache-2.0 */
 /* Copyright (c) 2026 Koji KITAYAMA */
 #include <msp432e401y.h>
+#include <string.h>
+
+int memcmp(const void *s1, const void *s2, size_t n)
+{
+  const unsigned char *p1 = s1;
+  const unsigned char *p2 = s2;
+  int diff = 0;
+  while (n--) {
+    diff = *p1++ - *p2++;
+    if (diff) break;
+  }
+  return diff;
+}
 
 void SystemInit(void)
 {

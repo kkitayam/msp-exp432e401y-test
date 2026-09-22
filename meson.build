@@ -9,6 +9,7 @@ objdump = find_program('objdump')
 dslite = find_program('dslite')
 python_exe = find_program('python3', 'python', required: true)
 ccxml = files('tools/MSP432E401Y.ccxml')
+run_script = files('scripts/run.py')
 
 serial_port_option = get_option('serial_port')
 
@@ -17,15 +18,20 @@ app_sources = files(
   'src/system.c',
   'src/uart.c',
   'src/main.c',
+  'src/test_code_flash.c',
+  'src/test_data_flash.c',
 )
 app_includes = include_directories('src')
 
+vendor_sources = files(
+  'vendor/msp432e401y_flash.c',
+)
 vendor_includes = include_directories('vendor')
 machine_linker = files('src/flash.ld')
 
 app_exe = executable(
   'app',
-  [app_sources],
+  [app_sources, vendor_sources],
   dependencies: [dependency('cmsis'),],
   include_directories: [app_includes, vendor_includes],
   link_args: [
@@ -42,7 +48,6 @@ app_hex = custom_target(
   input: app_exe,
   output: app_exe.name() + '.s32',
   command: [objcopy, '-O', 'srec', '@INPUT@', '@OUTPUT@'],
-  build_by_default: true,
 )
 
 app_txt = custom_target(
@@ -57,8 +62,6 @@ app_txt = custom_target(
 if serial_port_option == ''
   error('serial_port option must be specified. Use -Dserial_port=<port>')
 endif
-
-run_script = meson.current_source_dir() / 'scripts' / 'run.py'
 
 run_target(
   'deploy-run',
